@@ -18,29 +18,45 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
-      WRAPPER_DIR: wrapper
+      APP_DIR: sovereign-app
       APP_NAME: ${{ github.event.inputs.app_name || 'Chaosin' }}
       APP_VERSION: ${{ github.event.inputs.app_version || '1.0.0' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Java 17
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Capacitor 7 compiles with Java 21 (Java 17 fails with "invalid source release: 21")
+      - name: Set up Java 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
 
-      - name: Set up Gradle 8.7
+      # Capacitor 7 / AGP 8.7 needs Gradle 8.9+ (8.7 is too old)
+      - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: 8.7
+          gradle-version: 8.11.1
 
-      - name: Accept Android SDK licenses
-        run: |
-          yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install npm dependencies
+        working-directory: ${{ env.APP_DIR }}
+        run: npm install
+
+      # Bundles the web app into www/, runs "cap add android", patches permissions,
+      # generates icons/splash and syncs (does NOT build the APK yet).
+      - name: Generate native Android project
+        working-directory: ${{ env.APP_DIR }}
+        run: npm run setup
 
       - name: Patch app name and version
         run: |
@@ -48,7 +64,7 @@ jobs:
           import os, re, sys
           from xml.sax.saxutils import escape
 
-          root = os.environ["WRAPPER_DIR"]
+          root = os.path.join(os.environ["APP_DIR"], "android")
           name = os.environ["APP_NAME"].strip() or "Chaosin"
           version = os.environ["APP_VERSION"].strip() or "1.0.0"
 
@@ -72,10 +88,26 @@ jobs:
           with open(manifest_path, "w", encoding="utf-8") as f:
               f.write(manifest)
 
-          # ---- app/build.gradle.kts: versionName / versionCode ----
-          gradle_path = os.path.join(root, "app/build.gradle.kts")
-          if not os.path.isfile(gradle_path):
-              sys.exit("ERROR: " + gradle_path + " not found")
+          # ---- res/values/strings.xml: launcher/activity label used by Capacitor ----
+          strings_path = os.path.join(root, "app/src/main/res/values/strings.xml")
+          if os.path.isfile(strings_path):
+              with open(strings_path, "r", encoding="utf-8") as f:
+                  strings = f.read()
+              for key in ("app_name", "title_activity_main"):
+                  strings = re.sub(r'(<string\s+name="%s"[^>]*>)[^<]*(</string>)' % key,
+                                   lambda mm: mm.group(1) + label + mm.group(2), strings)
+              with open(strings_path, "w", encoding="utf-8") as f:
+                  f.write(strings)
+
+          # ---- app/build.gradle (Groovy) or build.gradle.kts: versionName / versionCode ----
+          gradle_path = None
+          for cand in ("app/build.gradle.kts", "app/build.gradle"):
+              p = os.path.join(root, cand)
+              if os.path.isfile(p):
+                  gradle_path = p
+                  break
+          if not gradle_path:
+              sys.exit("ERROR: app/build.gradle(.kts) not found in " + root)
           with open(gradle_path, "r", encoding="utf-8") as f:
               gradle = f.read()
 
@@ -84,27 +116,29 @@ jobs:
               nums.append(0)
           code = max(1, nums[0] * 1000000 + nums[1] * 1000 + nums[2])
           safe_version = version.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
+          kts = gradle_path.endswith(".kts")
+          eq = " = " if kts else " "
 
-          if re.search(r'versionName\s*=\s*"[^"]*"', gradle):
-              gradle = re.sub(r'(versionName\s*=\s*)"[^"]*"',
+          if re.search(r'versionName\s*=?\s*"[^"]*"', gradle):
+              gradle = re.sub(r'(versionName\s*=?\s*)"[^"]*"',
                               lambda mm: mm.group(1) + '"' + safe_version + '"', gradle, count=1)
           else:
               gradle = re.sub(r"(defaultConfig\s*\{)",
-                              lambda mm: mm.group(1) + '\n        versionName = "' + safe_version + '"',
+                              lambda mm: mm.group(1) + '\n        versionName' + eq + '"' + safe_version + '"',
                               gradle, count=1)
 
-          if re.search(r"versionCode\s*=\s*\d+", gradle):
-              gradle = re.sub(r"(versionCode\s*=\s*)\d+",
+          if re.search(r"versionCode\s*=?\s*\d+", gradle):
+              gradle = re.sub(r"(versionCode\s*=?\s*)\d+",
                               lambda mm: mm.group(1) + str(code), gradle, count=1)
           else:
               gradle = re.sub(r"(defaultConfig\s*\{)",
-                              lambda mm: mm.group(1) + "\n        versionCode = " + str(code),
+                              lambda mm: mm.group(1) + "\n        versionCode" + eq + str(code),
                               gradle, count=1)
 
           with open(gradle_path, "w", encoding="utf-8") as f:
               f.write(gradle)
 
-          print("Patched label=%r versionName=%r versionCode=%d" % (name, version, code))
+          print("Patched label=%r versionName=%r versionCode=%d in %s" % (name, version, code, gradle_path))
           PY
 
       - name: Inject app icon
@@ -115,7 +149,7 @@ jobs:
           import glob, os, re
           from PIL import Image
 
-          root = os.environ["WRAPPER_DIR"]
+          root = os.path.join(os.environ["APP_DIR"], "android")
           sizes = {"mdpi": 48, "hdpi": 72, "xhdpi": 96, "xxhdpi": 144, "xxxhdpi": 192}
           src = Image.open("build-icon.png").convert("RGBA")
           side = max(src.size)
@@ -157,12 +191,12 @@ jobs:
           PY
 
       - name: Build debug APK
-        working-directory: ${{ env.WRAPPER_DIR }}
+        working-directory: ${{ env.APP_DIR }}/android
         run: gradle assembleDebug --no-daemon
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: ${{ github.event.inputs.app_name || 'Chaosin' }}
-          path: ${{ env.WRAPPER_DIR }}/app/build/outputs/apk/debug/app-debug.apk
+          path: ${{ env.APP_DIR }}/android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
