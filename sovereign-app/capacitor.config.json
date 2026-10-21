@@ -1,0 +1,11 @@
+{
+  "appId": "com.sovereign.protocol",
+  "appName": "Sovereign Protocol",
+  "webDir": "www",
+  "server": { "androidScheme": "https" },
+  "android": { "adjustMarginsForEdgeToEdge": "auto" },
+  "plugins": {
+    "LocalNotifications": { "smallIcon": "ic_stat_icon", "iconColor": "#F59E0B" },
+    "StatusBar": { "overlaysWebView": false }
+  }
+}
