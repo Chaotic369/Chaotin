@@ -45,8 +45,13 @@ jobs:
         with:
           gradle-version: 8.11.1
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # The runner already includes the Android SDK; only the licenses need accepting.
+      # (android-actions/setup-android fails here: "Failed to find package 'tools'")
+      - name: Accept Android SDK licenses
+        run: |
+          SDKM="$(command -v sdkmanager || ls "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | tail -n 1)"
+          echo "Using $SDKM"
+          yes | "$SDKM" --licenses > /dev/null || true
 
       - name: Install npm dependencies
         working-directory: ${{ env.APP_DIR }}
