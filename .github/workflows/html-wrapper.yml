@@ -1,0 +1,77 @@
+name: Build Artifact (HTML Wrapper)
+on:
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: 'App display name'
+        required: false
+        default: 'My App'
+      app_version:
+        description: 'App version'
+        required: false
+        default: '1.0.0'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      APP_NAME: ${{ github.event.inputs.app_name }}
+      APP_VERSION: ${{ github.event.inputs.app_version }}
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-34 build-tools;34.0.0'
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install Cordova
+        run: npm install -g cordova
+      - name: Build Artifact
+        shell: bash
+        run: |
+          set -e
+          export CI=true
+          export CORDOVA_NO_TELEMETRY=1
+          export CORDOVA_ANDROID_GRADLE_DISTRIBUTION_URL=https://services.gradle.org/distributions/gradle-8.7-all.zip
+          APP_ID="com.wrapper.app$(date +%s | tail -c 7)"
+          SAFE_VERSION="$(printf '%s' "${APP_VERSION:-1.0.0}" | tr -cd '0-9A-Za-z._-')"
+          [ -z "$SAFE_VERSION" ] && SAFE_VERSION="1.0.0"
+          cd /tmp
+          cordova create app "$APP_ID" "App" --no-telemetry
+          rm -rf app/www/*
+          rsync -a --exclude='.git' --exclude='.github' --exclude='build-icon.png' "$GITHUB_WORKSPACE/" app/www/
+          HAS_ICON=0
+          if [ -f "$GITHUB_WORKSPACE/build-icon.png" ]; then
+            cp "$GITHUB_WORKSPACE/build-icon.png" app/icon.png
+            HAS_ICON=1
+          fi
+          cd app
+          python3 - "${APP_NAME:-My App}" "$SAFE_VERSION" "$HAS_ICON" << 'PYEOF'
+          import re, sys
+          from xml.sax.saxutils import escape
+          name, ver, has_icon = sys.argv[1], sys.argv[2], sys.argv[3]
+          s = open('config.xml', encoding='utf-8').read()
+          s = re.sub(r'(<widget\b[^>]*\bversion=)"[^"]*"', lambda m: m.group(1) + '"' + ver + '"', s, count=1)
+          s = re.sub(r'<name>.*?</name>', lambda m: '<name>' + escape(name) + '</name>', s, count=1, flags=re.S)
+          extra = '    <allow-navigation href="*" />\n    <allow-intent href="*" />\n'
+          if has_icon == '1':
+              extra += '    <icon src="icon.png" />\n'
+          s = s.replace('</widget>', extra + '</widget>')
+          open('config.xml', 'w', encoding='utf-8').write(s)
+          PYEOF
+          cordova platform add android@13.0.0 --no-telemetry
+          cordova build android --no-telemetry
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Android-APK
+          path: /tmp/app/platforms/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
